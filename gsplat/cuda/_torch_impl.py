@@ -305,7 +305,7 @@ def _fully_fused_projection(
     )  # [C, N, 3]
 
     depths = means_c[..., 2]  # [C, N]
-    
+
     # scale factor for 3 sigma in 2 dimension for a 2d multivariate gaussian
     # distribution
     scale_factor = 3.4086
