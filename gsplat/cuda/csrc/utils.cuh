@@ -6,6 +6,8 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#define FILTER_INV_SQUARE 2.0f
+
 namespace gsplat {
 
 template <typename T>
@@ -244,11 +246,7 @@ inline __device__ void ortho_proj_vjp(
     // df/dx = fx * df/dpixx
     // df/dy = fy * df/dpixy
     // df/dz = 0
-    v_mean3d += vec3<T>(
-        fx * v_mean2d[0],
-        fy * v_mean2d[1],
-        0.f
-    );
+    v_mean3d += vec3<T>(fx * v_mean2d[0], fy * v_mean2d[1], 0.f);
 }
 
 template <typename T>
@@ -371,6 +369,150 @@ inline __device__ void persp_proj_vjp(
     v_mean3d.z += -fx * rz2 * v_J[0][0] - fy * rz2 * v_J[1][1] +
                   2.f * fx * tx * rz3 * v_J[2][0] +
                   2.f * fy * ty * rz3 * v_J[2][1];
+}
+
+template <typename T>
+inline __device__ void fisheye_proj(
+    // inputs
+    const vec3<T> mean3d,
+    const mat3<T> cov3d,
+    const T fx,
+    const T fy,
+    const T cx,
+    const T cy,
+    const uint32_t width,
+    const uint32_t height,
+    // outputs
+    mat2<T> &cov2d,
+    vec2<T> &mean2d
+) {
+    T x = mean3d[0], y = mean3d[1], z = mean3d[2];
+
+    T eps = 0.0000001f;
+    T xy_len = glm::length(glm::vec2({x, y})) + eps;
+    T theta = glm::atan(xy_len, z + eps);
+    mean2d =
+        vec2<T>({x * fx * theta / xy_len + cx, y * fy * theta / xy_len + cy});
+
+    T x2 = x * x + eps;
+    T y2 = y * y;
+    T xy = x * y;
+    T x2y2 = x2 + y2;
+    T x2y2z2_inv = 1.f / (x2y2 + z * z);
+
+    T b = glm::atan(xy_len, z) / xy_len / x2y2;
+    T a = z * x2y2z2_inv / (x2y2);
+    mat3x2<T> J = mat3x2<T>(
+        fx * (x2 * a + y2 * b),
+        fy * xy * (a - b),
+        fx * xy * (a - b),
+        fy * (y2 * a + x2 * b),
+        -fx * x * x2y2z2_inv,
+        -fy * y * x2y2z2_inv
+    );
+    cov2d = J * cov3d * glm::transpose(J);
+}
+
+template <typename T>
+inline __device__ void fisheye_proj_vjp(
+    // fwd inputs
+    const vec3<T> mean3d,
+    const mat3<T> cov3d,
+    const T fx,
+    const T fy,
+    const T cx,
+    const T cy,
+    const uint32_t width,
+    const uint32_t height,
+    // grad outputs
+    const mat2<T> v_cov2d,
+    const vec2<T> v_mean2d,
+    // grad inputs
+    vec3<T> &v_mean3d,
+    mat3<T> &v_cov3d
+) {
+    T x = mean3d[0], y = mean3d[1], z = mean3d[2];
+
+    const T eps = 0.0000001f;
+    T x2 = x * x + eps;
+    T y2 = y * y;
+    T xy = x * y;
+    T x2y2 = x2 + y2;
+    T len_xy = length(glm::vec2({x, y})) + eps;
+    const T x2y2z2 = x2y2 + z * z;
+    T x2y2z2_inv = 1.f / x2y2z2;
+    T b = glm::atan(len_xy, z) / len_xy / x2y2;
+    T a = z * x2y2z2_inv / (x2y2);
+    v_mean3d += vec3<T>(
+        fx * (x2 * a + y2 * b) * v_mean2d[0] + fy * xy * (a - b) * v_mean2d[1],
+        fx * xy * (a - b) * v_mean2d[0] + fy * (y2 * a + x2 * b) * v_mean2d[1],
+        -fx * x * x2y2z2_inv * v_mean2d[0] - fy * y * x2y2z2_inv * v_mean2d[1]
+    );
+
+    const T theta = glm::atan(len_xy, z);
+    const T J_b = theta / len_xy / x2y2;
+    const T J_a = z * x2y2z2_inv / (x2y2);
+    // mat3x2 is 3 columns x 2 rows.
+    mat3x2<T> J = mat3x2<T>(
+        fx * (x2 * J_a + y2 * J_b),
+        fy * xy * (J_a - J_b), // 1st column
+        fx * xy * (J_a - J_b),
+        fy * (y2 * J_a + x2 * J_b), // 2nd column
+        -fx * x * x2y2z2_inv,
+        -fy * y * x2y2z2_inv // 3rd column
+    );
+    v_cov3d += glm::transpose(J) * v_cov2d * J;
+
+    mat3x2<T> v_J = v_cov2d * J * glm::transpose(cov3d) +
+                    glm::transpose(v_cov2d) * J * cov3d;
+    T l4 = x2y2z2 * x2y2z2;
+
+    T E = -l4 * x2y2 * theta + x2y2z2 * x2y2 * len_xy * z;
+    T F = 3 * l4 * theta - 3 * x2y2z2 * len_xy * z - 2 * x2y2 * len_xy * z;
+
+    T A = x * (3 * E + x2 * F);
+    T B = y * (E + x2 * F);
+    T C = x * (E + y2 * F);
+    T D = y * (3 * E + y2 * F);
+
+    T S1 = x2 - y2 - z * z;
+    T S2 = y2 - x2 - z * z;
+    T inv1 = x2y2z2_inv * x2y2z2_inv;
+    T inv2 = inv1 / (x2y2 * x2y2 * len_xy);
+
+    T dJ_dx00 = fx * A * inv2;
+    T dJ_dx01 = fx * B * inv2;
+    T dJ_dx02 = fx * S1 * inv1;
+    T dJ_dx10 = fy * B * inv2;
+    T dJ_dx11 = fy * C * inv2;
+    T dJ_dx12 = 2.f * fy * xy * inv1;
+
+    T dJ_dy00 = dJ_dx01;
+    T dJ_dy01 = fx * C * inv2;
+    T dJ_dy02 = 2.f * fx * xy * inv1;
+    T dJ_dy10 = dJ_dx11;
+    T dJ_dy11 = fy * D * inv2;
+    T dJ_dy12 = fy * S2 * inv1;
+
+    T dJ_dz00 = dJ_dx02;
+    T dJ_dz01 = dJ_dy02;
+    T dJ_dz02 = 2.f * fx * x * z * inv1;
+    T dJ_dz10 = dJ_dx12;
+    T dJ_dz11 = dJ_dy12;
+    T dJ_dz12 = 2.f * fy * y * z * inv1;
+
+    T dL_dtx_raw = dJ_dx00 * v_J[0][0] + dJ_dx01 * v_J[1][0] +
+                   dJ_dx02 * v_J[2][0] + dJ_dx10 * v_J[0][1] +
+                   dJ_dx11 * v_J[1][1] + dJ_dx12 * v_J[2][1];
+    T dL_dty_raw = dJ_dy00 * v_J[0][0] + dJ_dy01 * v_J[1][0] +
+                   dJ_dy02 * v_J[2][0] + dJ_dy10 * v_J[0][1] +
+                   dJ_dy11 * v_J[1][1] + dJ_dy12 * v_J[2][1];
+    T dL_dtz_raw = dJ_dz00 * v_J[0][0] + dJ_dz01 * v_J[1][0] +
+                   dJ_dz02 * v_J[2][0] + dJ_dz10 * v_J[0][1] +
+                   dJ_dz11 * v_J[1][1] + dJ_dz12 * v_J[2][1];
+    v_mean3d.x += dL_dtx_raw;
+    v_mean3d.y += dL_dty_raw;
+    v_mean3d.z += dL_dtz_raw;
 }
 
 template <typename T>
@@ -501,6 +643,71 @@ inline __device__ void add_blur_vjp(
     v_covar[1][0] += v_sqr_comp * (one_minus_sqr_comp * conic_blur[1][0]);
     v_covar[1][1] += v_sqr_comp * (one_minus_sqr_comp * conic_blur[1][1] -
                                    eps2d * det_conic_blur);
+}
+
+template <typename T>
+inline __device__ void compute_ray_transforms_aabb_vjp(
+    const T *ray_transforms,
+    const T *v_means2d,
+    const vec3<T> v_normals,
+    const mat3<T> W,
+    const mat3<T> P,
+    const vec3<T> cam_pos,
+    const vec3<T> mean_c,
+    const vec4<T> quat,
+    const vec2<T> scale,
+    mat3<T> &_v_ray_transforms,
+    vec4<T> &v_quat,
+    vec2<T> &v_scale,
+    vec3<T> &v_mean
+) {
+    if (v_means2d[0] != 0 || v_means2d[1] != 0) {
+        const T distance = ray_transforms[6] * ray_transforms[6] + ray_transforms[7] * ray_transforms[7] -
+                           ray_transforms[8] * ray_transforms[8];
+        const T f = 1 / (distance);
+        const T dpx_dT00 = f * ray_transforms[6];
+        const T dpx_dT01 = f * ray_transforms[7];
+        const T dpx_dT02 = -f * ray_transforms[8];
+        const T dpy_dT10 = f * ray_transforms[6];
+        const T dpy_dT11 = f * ray_transforms[7];
+        const T dpy_dT12 = -f * ray_transforms[8];
+        const T dpx_dT30 = ray_transforms[0] * (f - 2 * f * f * ray_transforms[6] * ray_transforms[6]);
+        const T dpx_dT31 = ray_transforms[1] * (f - 2 * f * f * ray_transforms[7] * ray_transforms[7]);
+        const T dpx_dT32 = -ray_transforms[2] * (f + 2 * f * f * ray_transforms[8] * ray_transforms[8]);
+        const T dpy_dT30 = ray_transforms[3] * (f - 2 * f * f * ray_transforms[6] * ray_transforms[6]);
+        const T dpy_dT31 = ray_transforms[4] * (f - 2 * f * f * ray_transforms[7] * ray_transforms[7]);
+        const T dpy_dT32 = -ray_transforms[5] * (f + 2 * f * f * ray_transforms[8] * ray_transforms[8]);
+
+        _v_ray_transforms[0][0] += v_means2d[0] * dpx_dT00;
+        _v_ray_transforms[0][1] += v_means2d[0] * dpx_dT01;
+        _v_ray_transforms[0][2] += v_means2d[0] * dpx_dT02;
+        _v_ray_transforms[1][0] += v_means2d[1] * dpy_dT10;
+        _v_ray_transforms[1][1] += v_means2d[1] * dpy_dT11;
+        _v_ray_transforms[1][2] += v_means2d[1] * dpy_dT12;
+        _v_ray_transforms[2][0] += v_means2d[0] * dpx_dT30 + v_means2d[1] * dpy_dT30;
+        _v_ray_transforms[2][1] += v_means2d[0] * dpx_dT31 + v_means2d[1] * dpy_dT31;
+        _v_ray_transforms[2][2] += v_means2d[0] * dpx_dT32 + v_means2d[1] * dpy_dT32;
+    }
+
+    mat3<T> R = quat_to_rotmat(quat);
+    mat3<T> v_M = P * glm::transpose(_v_ray_transforms);
+    mat3<T> W_t = glm::transpose(W);
+    mat3<T> v_RS = W_t * v_M;
+    vec3<T> v_tn = W_t * v_normals;
+
+    // dual visible
+    vec3<T> tn = W * R[2];
+    T cos = glm::dot(-tn, mean_c);
+    T multiplier = cos > 0 ? 1 : -1;
+    v_tn *= multiplier;
+
+    mat3<T> v_R = mat3<T>(v_RS[0] * scale[0], v_RS[1] * scale[1], v_tn);
+
+    quat_to_rotmat_vjp<T>(quat, v_R, v_quat);
+    v_scale[0] += (T)glm::dot(v_RS[0], R[0]);
+    v_scale[1] += (T)glm::dot(v_RS[1], R[1]);
+
+    v_mean += v_RS[2];
 }
 
 } // namespace gsplat
