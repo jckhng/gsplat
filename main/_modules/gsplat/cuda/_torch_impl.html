@@ -620,7 +620,7 @@
     
     <span class="c1"># scale factor for 3 sigma in 2 dimension for a 2d multivariate gaussian</span>
     <span class="c1"># distribution</span>
-    <span class="n">scale_factor</span> <span class="o">=</span> <span class="mf">3.4086</span> 
+    <span class="n">scale_factor</span> <span class="o">=</span> <span class="mf">3.4086</span>
     <span class="c1"># calculating magnitude of major and and minor axis</span>
     <span class="n">b</span> <span class="o">=</span> <span class="p">(</span><span class="n">covars2d</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">covars2d</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">/</span> <span class="mi">2</span>  <span class="c1"># (...,)</span>
     <span class="n">v1</span> <span class="o">=</span> <span class="n">b</span> <span class="o">+</span> <span class="n">torch</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">clamp</span><span class="p">(</span><span class="n">b</span><span class="o">**</span><span class="mi">2</span> <span class="o">-</span> <span class="n">det</span><span class="p">,</span> <span class="nb">min</span><span class="o">=</span><span class="mf">0.01</span><span class="p">))</span>  <span class="c1"># (...,)</span>
