@@ -308,7 +308,7 @@ def _fully_fused_projection(
     
     # scale factor for 3 sigma in 2 dimension for a 2d multivariate gaussian
     # distribution
-    scale_factor = 3.4086 
+    scale_factor = 3.4086
     # calculating magnitude of major and and minor axis
     b = (covars2d[..., 0, 0] + covars2d[..., 1, 1]) / 2  # (...,)
     v1 = b + torch.sqrt(torch.clamp(b**2 - det, min=0.01))  # (...,)
