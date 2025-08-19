@@ -39,7 +39,6 @@ from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 
-
 @dataclass
 class Config:
     # Disable viewer
@@ -66,7 +65,7 @@ class Config:
     # Normalize the world space
     normalize_world_space: bool = True
     # Camera model
-    camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+    camera_model: Literal["pinhole", "ortho", "fisheye"] = "fisheye"
 
     # Port for the viewer server
     port: int = 8080
@@ -183,6 +182,9 @@ class Config:
     # 3DGUT (uncented transform + eval 3D)
     with_ut: bool = False
     with_eval3d: bool = False
+    process_to_perfect_camera: bool = True
+    # Unscented transform sampling method: 'sigma' or 'cubature'
+    ut_sampling_method: Literal["sigma", "cubature"] = "sigma"
 
     # Whether use fused-bilateral grid
     use_fused_bilagrid: bool = False
@@ -336,6 +338,7 @@ class Runner:
             factor=cfg.data_factor,
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
+            process_to_perfect_camera=cfg.process_to_perfect_camera,
         )
         self.trainset = Dataset(
             self.parser,
@@ -624,6 +627,15 @@ class Runner:
                 points = data["points"].to(device)  # [1, M, 2]
                 depths_gt = data["depths"].to(device)  # [1, M]
 
+            if cfg.process_to_perfect_camera:
+                radial_coeffs = None
+            else:
+                if cfg.with_ut: 
+                    # Only UT can handle distortion parameters
+                    radial_coeffs = data["radial_coeffs"].to(device)
+                else:
+                    radial_coeffs = None
+
             height, width = pixels.shape[1:3]
 
             if cfg.pose_noise:
@@ -647,6 +659,7 @@ class Runner:
                 image_ids=image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
+                radial_coeffs=radial_coeffs,
             )
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
@@ -710,9 +723,16 @@ class Runner:
 
             # regularizations
             if cfg.opacity_reg > 0.0:
-                loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
+                loss = (
+                    loss
+                    + cfg.opacity_reg
+                    * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
+                )
             if cfg.scale_reg > 0.0:
-                loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
+                loss = (
+                    loss
+                    + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
+                )
 
             loss.backward()
 
@@ -923,6 +943,14 @@ class Runner:
             masks = data["mask"].to(device) if "mask" in data else None
             height, width = pixels.shape[1:3]
 
+            if cfg.process_to_perfect_camera:
+                radial_coeffs = None
+            else:
+                if cfg.with_ut:
+                    radial_coeffs = data["radial_coeffs"].to(device)
+                else:
+                    radial_coeffs = None
+
             torch.cuda.synchronize()
             tic = time.time()
             colors, _, _ = self.rasterize_splats(
@@ -934,6 +962,7 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 masks=masks,
+                radial_coeffs=radial_coeffs,
             )  # [1, H, W, 3]
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
