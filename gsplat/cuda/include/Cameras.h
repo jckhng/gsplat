@@ -23,6 +23,11 @@ enum class ShutterType {
 // ---------------------------------------------------------------------------------------------
 
 // Gaussian-specific types
+enum class UnscentedSamplingMethod {
+    SIGMA_POINTS,
+    FULLY_SYMMETRIC_CUBATURE_POINTS
+};
+
 struct UnscentedTransformParameters {
     // See Gustafsson and Hendeby 2012 for sigma point parameterization - this
     // default parameter choice is based on
@@ -41,6 +46,9 @@ struct UnscentedTransformParameters {
         false; // true: all sigma points must be valid to mark a projection as
                // "valid" false: a single valid sigma point is sufficient to
                // mark a projection as "valid"
+               
+    // Controls which sampling method to use for the unscented transform
+    UnscentedSamplingMethod sampling_method = UnscentedSamplingMethod::SIGMA_POINTS;
 };
 
 // FTheta Camera Support
