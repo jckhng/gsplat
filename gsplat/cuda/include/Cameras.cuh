@@ -1443,5 +1443,3 @@ world_gaussian_to_image_gaussian_unscented_transform_shutter_pose(
         return {image_mean, image_covariance, valid};
     }
 }
-
-
