@@ -39,6 +39,7 @@ from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 
+
 @dataclass
 class Config:
     # Disable viewer
@@ -630,7 +631,7 @@ class Runner:
             if cfg.process_to_perfect_camera:
                 radial_coeffs = None
             else:
-                if cfg.with_ut: 
+                if cfg.with_ut:
                     # Only UT can handle distortion parameters
                     radial_coeffs = data["radial_coeffs"].to(device)
                 else:

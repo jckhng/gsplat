@@ -275,7 +275,7 @@ class Parser:
             self.imsize_dict[camera_id] = (int(width * s_width), int(height * s_height))
 
         # undistortion
-        self.camtype = camtype # "perspective" or "fisheye"
+        self.camtype = camtype  # "perspective" or "fisheye"
         if process_to_perfect_camera:
             self.mapx_dict = dict()
             self.mapy_dict = dict()
@@ -379,10 +379,10 @@ class Dataset:
         index = self.indices[item]
         image = imageio.imread(self.parser.image_paths[index])[..., :3]
         camera_id = self.parser.camera_ids[index]
-        K = self.parser.Ks_dict[camera_id].copy() 
+        K = self.parser.Ks_dict[camera_id].copy()
         camtoworlds = self.parser.camtoworlds[index]
-        params = self.parser.params_dict[camera_id] # distortion parameters
-        
+        params = self.parser.params_dict[camera_id]  # distortion parameters
+
         if self.parser.process_to_perfect_camera:
             # K is already undistorted to perfect camera
             mask = self.parser.mask_dict[camera_id]
@@ -415,13 +415,13 @@ class Dataset:
         }
         if mask is not None:
             data["mask"] = torch.from_numpy(mask).bool()
-        
+
         if not self.parser.process_to_perfect_camera:
             # pass out distortion parameters so that we could consider
             # distortion during rendering
-            assert self.parser.camtype == "fisheye", (
-                f"Only fisheye camera is supported for now, got {self.parser.camtype}"
-            )
+            assert (
+                self.parser.camtype == "fisheye"
+            ), f"Only fisheye camera is supported for now, got {self.parser.camtype}"
             radial_coeffs = params[:4]
             data["radial_coeffs"] = torch.from_numpy(radial_coeffs).float()
 
