@@ -1270,6 +1270,65 @@ inline __device__ auto world_gaussian_sigma_points(
     return ret;
 }
 
+
+template <size_t D = 3>
+struct FullySymmetricCubaturePoints {
+    std::array<glm::fvec3, 14> points;
+    std::array<float, 14> weights_mean;
+    std::array<float, 14> weights_covariance;
+};
+
+inline __device__ auto world_gaussian_fully_symmetric_cubature_points(
+    UnscentedTransformParameters const &unscented_transform_parameters,
+    glm::fvec3 const &mean,
+    glm::fvec3 const &scale,
+    glm::fquat const &rot
+) -> FullySymmetricCubaturePoints<3> {
+    constexpr size_t D = 3;
+    constexpr size_t N = (1 << D) + 2 * D;
+    FullySymmetricCubaturePoints<D> ret{};
+
+    glm::fmat3 R = glm::mat3_cast(rot);
+
+    // Weights
+    float w1 = 4.0f / ((D + 2) * (D + 2));
+    float w2 = ((D - 2) * (D - 2)) / (float((1 << D) * (D + 2) * (D + 2)));
+
+    // Scaling
+    float r = std::sqrt((D + 2) / 2.0f);
+    float s = std::sqrt((D + 2) / float(D - 2));
+
+    // First 2n points: ±r along each axis
+    for (int i = 0; i < D; ++i) {
+        glm::fvec3 delta = r * scale[i] * R[i];
+        // +r
+        glm::fvec3 pt1 = mean + delta;
+        // -r
+        glm::fvec3 pt2 = mean - delta;
+        ret.points[i] = pt1;
+        ret.points[i + D] = pt2;
+        ret.weights_mean[i] = w1;
+        ret.weights_mean[i + D] = w1;
+        ret.weights_covariance[i] = w1;
+        ret.weights_covariance[i + D] = w1;
+    }
+
+    // Next 2^n points: all sign combinations of ±s
+    // There are 8 such points in 3D
+    for (int combo = 0; combo < (1 << D); ++combo) {
+        glm::fvec3 delta(0.0f);
+        for (int d = 0; d < D; ++d) {
+            float sign = (combo & (1 << d)) ? 1.0f : -1.0f;
+            delta += sign * s * scale[d] * R[d];
+        }
+        ret.points[2 * D + combo] = mean + delta;
+        ret.weights_mean[2 * D + combo] = w2;
+        ret.weights_covariance[2 * D + combo] = w2;
+    }
+
+    return ret;
+}
+
 struct ImageGaussianReturn {
     glm::fvec2 mean;
     glm::fmat2 covariance;
@@ -1286,56 +1345,100 @@ world_gaussian_to_image_gaussian_unscented_transform_shutter_pose(
     glm::fvec3 const &gaussian_world_scale,
     glm::fquat const &gaussian_world_rot
 ) -> ImageGaussianReturn {
-    // Compute sigma points for input distribution
-    auto const sigma_points = world_gaussian_sigma_points(
-        unscented_transform_parameters,
-        gaussian_world_mean,
-        gaussian_world_scale,
-        gaussian_world_rot
-    );
+    // Process points based on chosen sampling method 
+    if (unscented_transform_parameters.sampling_method == UnscentedSamplingMethod::SIGMA_POINTS) {
+        // Get sigma points
+        auto const sigma_points = world_gaussian_sigma_points(
+            unscented_transform_parameters,
+            gaussian_world_mean,
+            gaussian_world_scale,
+            gaussian_world_rot
+        );
 
-    // Transform sigma points / compute approximation of output distribution via
-    // sample mean / covariance
-    bool valid = unscented_transform_parameters.require_all_sigma_points_valid;
-    auto image_points = std::array<glm::fvec2, 2 * 3 + 1>{};
-    auto image_mean = glm::fvec2{0};
-    auto image_covariance = glm::fmat2{0};
-#pragma unroll
-    for (auto i = 0u; i < std::size(image_points); ++i) {
-        auto const [image_point, point_valid] =
-            // annotate with 'template' to avoid warnings: #174-D: expression
-            // has no effect
-            camera_model.template world_point_to_image_point_shutter_pose<>(
-                sigma_points.points[i],
-                rolling_shutter_parameters,
-                unscented_transform_parameters.in_image_margin_factor
-            );
+        // Transform sigma points / compute approximation of output distribution
+        bool valid = unscented_transform_parameters.require_all_sigma_points_valid;
+        auto image_points = std::array<glm::fvec2, 2 * 3 + 1>{};
+        auto image_mean = glm::fvec2{0};
+        auto image_covariance = glm::fmat2{0};
 
-        if (unscented_transform_parameters.require_all_sigma_points_valid) {
-            valid &= point_valid; // all have to be valid
-            if (!point_valid) {
-                // Early exit if invalid
-                return {image_mean, image_covariance, false};
+        #pragma unroll
+        for (auto i = 0u; i < std::size(image_points); ++i) {
+            auto const [image_point, point_valid] =
+                camera_model.template world_point_to_image_point_shutter_pose<>(
+                    sigma_points.points[i],
+                    rolling_shutter_parameters,
+                    unscented_transform_parameters.in_image_margin_factor
+                );
+
+            if (unscented_transform_parameters.require_all_sigma_points_valid) {
+                valid &= point_valid;
+                if (!point_valid) {
+                    return {image_mean, image_covariance, false};
+                }
+            } else {
+                valid |= point_valid;
             }
-        } else {
-            valid |= point_valid; // any valid is sufficient
+            image_points[i] = {image_point.x, image_point.y};
+            image_mean += sigma_points.weights_mean[i] * image_points[i];
         }
-        image_points[i] = {image_point.x, image_point.y};
 
-        image_mean += sigma_points.weights_mean[i] * image_points[i];
+        if (!valid) {
+            return {image_mean, image_covariance, false};
+        }
+
+        #pragma unroll
+        for (auto i = 0u; i < std::size(image_points); ++i) {
+            auto const image_mean_vec = image_points[i] - image_mean;
+            image_covariance += sigma_points.weights_covariance[i] *
+                                glm::outerProduct(image_mean_vec, image_mean_vec);
+        }
+
+        return {image_mean, image_covariance, valid};
+    } else {
+        // Use fully symmetric cubature points
+        auto const sigma_points = world_gaussian_fully_symmetric_cubature_points(
+            unscented_transform_parameters,
+            gaussian_world_mean,
+            gaussian_world_scale,
+            gaussian_world_rot
+        );
+
+        bool valid = unscented_transform_parameters.require_all_sigma_points_valid;
+        auto image_points = std::array<glm::fvec2, 14>{};
+        auto image_mean = glm::fvec2{0};
+        auto image_covariance = glm::fmat2{0};
+
+        #pragma unroll
+        for (auto i = 0u; i < std::size(image_points); ++i) {
+            auto const [image_point, point_valid] =
+                camera_model.template world_point_to_image_point_shutter_pose<>(
+                    sigma_points.points[i],
+                    rolling_shutter_parameters,
+                    unscented_transform_parameters.in_image_margin_factor
+                );
+
+            if (unscented_transform_parameters.require_all_sigma_points_valid) {
+                valid &= point_valid;
+                if (!point_valid) {
+                    return {image_mean, image_covariance, false};
+                }
+            } else {
+                valid |= point_valid;
+            }
+            image_points[i] = {image_point.x, image_point.y};
+            image_mean += sigma_points.weights_mean[i] * image_points[i];
+        }
+
+        if (!valid) {
+            return {image_mean, image_covariance, false};
+        }
+
+        #pragma unroll
+        for (auto i = 0u; i < std::size(image_points); ++i) {
+            auto const image_mean_vec = image_points[i] - image_mean;
+            image_covariance += sigma_points.weights_covariance[i] *
+                                glm::outerProduct(image_mean_vec, image_mean_vec);
+        }
+
+        return {image_mean, image_covariance, valid};
     }
-
-    if (!valid) {
-        // Early exit if invalid
-        return {image_mean, image_covariance, false};
-    }
-
-#pragma unroll
-    for (auto i = 0u; i < std::size(image_points); ++i) {
-        auto const image_mean_vec = image_points[i] - image_mean;
-        image_covariance += sigma_points.weights_covariance[i] *
-                            glm::outerProduct(image_mean_vec, image_mean_vec);
-    }
-
-    return {image_mean, image_covariance, valid};
-}

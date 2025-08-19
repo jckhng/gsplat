@@ -81,13 +81,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .value("GLOBAL", ShutterType::GLOBAL)
         .export_values();
 
+    py::enum_<UnscentedSamplingMethod>(m, "UnscentedSamplingMethod")
+        .value("SIGMA_POINTS", UnscentedSamplingMethod::SIGMA_POINTS)
+        .value("FULLY_SYMMETRIC_CUBATURE_POINTS", UnscentedSamplingMethod::FULLY_SYMMETRIC_CUBATURE_POINTS)
+        .export_values();
+
     py::class_<UnscentedTransformParameters>(m, "UnscentedTransformParameters")
         .def(py::init<>())
         .def_readwrite("alpha", &UnscentedTransformParameters::alpha)
         .def_readwrite("beta", &UnscentedTransformParameters::beta)
         .def_readwrite("kappa", &UnscentedTransformParameters::kappa)
         .def_readwrite("in_image_margin_factor", &UnscentedTransformParameters::in_image_margin_factor)
-        .def_readwrite("require_all_sigma_points_valid", &UnscentedTransformParameters::require_all_sigma_points_valid);
+        .def_readwrite("require_all_sigma_points_valid", &UnscentedTransformParameters::require_all_sigma_points_valid)
+        .def_readwrite("sampling_method", &UnscentedTransformParameters::sampling_method);
 
     // FTheta Camera support
     py::enum_<FThetaCameraDistortionParameters::PolynomialType>(m, "FThetaPolynomialType")
